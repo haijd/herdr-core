@@ -32,8 +32,12 @@ pub(super) async fn reattach(core: Arc<Core>, m: Machine, line: Arc<Line>) {
         params["history"] = 0.into();
         params["resumed"] = true.into();
         negotiate_resize(&line, &mut params);
+        negotiate_paint_boundaries(&line, &mut params);
         let deadline = deadline_for(&core, "terminal.attach", &params);
-        let sink = ((r.conn.clone(), here), r.params["resize_notifications"] == true);
+        let sink = (
+            (r.conn.clone(), here),
+            (r.params["resize_notifications"] == true, r.params["paint_boundaries"] == true),
+        );
         let reply = line.call_into(&m.name, "terminal.attach", params, Some(sink), deadline).await;
         let lost_resize = matches!(&reply, Err(e) if e.message == RESIZE_LOST);
         let mut st = core.lock();
@@ -79,16 +83,23 @@ pub(super) fn negotiate_resize(line: &Line, params: &mut Value) {
     }
 }
 
+pub(super) fn negotiate_paint_boundaries(line: &Line, params: &mut Value) {
+    if params["paint_boundaries"] == true && !line.features.iter().any(|f| f == "paint_boundaries") {
+        params["paint_boundaries"] = false.into();
+    }
+}
+
 /// Opens a viewer here on a terminal there: the stream channel there is
 /// relayed to a new channel on this connection, both ways.
 pub async fn attach(core: &Core, conn: &Arc<Conn>, m: &Machine, mut params: Value) -> Result<Value, RpcError> {
     let line = line(core, m).await?;
     negotiate_resize(&line, &mut params);
+    negotiate_paint_boundaries(&line, &mut params);
     let here = conn.new_channel();
     conn.with(|out| out.open_paused(here));
     let deadline = deadline_for(core, "terminal.attach", &params);
     match line
-        .call_into(&m.name, "terminal.attach", params.clone(), Some(((conn.clone(), here), false)), deadline)
+        .call_into(&m.name, "terminal.attach", params.clone(), Some(((conn.clone(), here), (false, false))), deadline)
         .await
     {
         Ok(mut r) => {
@@ -98,6 +109,11 @@ pub async fn attach(core: &Core, conn: &Arc<Conn>, m: &Machine, mut params: Valu
                 && r["resize_notifications"] == true;
             r["resize_notifications"] = enabled.into();
             params["resize_notifications"] = enabled.into();
+            let paint_enabled = enabled
+                && params["paint_boundaries"] == true
+                && r["paint_boundaries"] == true;
+            r["paint_boundaries"] = paint_enabled.into();
+            params["paint_boundaries"] = paint_enabled.into();
             let automatic_input = automatic_input(&line, &r);
             r["automatic_input"] = automatic_input.into();
             let viewer = Relayed { automatic_input, line, there, conn: conn.clone(), machine: m.id.clone(), params };

@@ -19,8 +19,8 @@ use tokio::sync::{mpsc, oneshot};
 
 /// A viewer here that a stream there goes to: its connection and channel.
 type Sink = (Arc<Conn>, u32);
-/// A pending reply, its stream sink and whether resize support is required.
-type Waiting = (oneshot::Sender<Value>, Option<(Sink, bool)>);
+/// A pending reply, its stream sink and required stream capabilities `(resize, paint_boundaries)`.
+type Waiting = (oneshot::Sender<Value>, Option<(Sink, (bool, bool))>);
 
 mod viewers;
 #[cfg(test)]
@@ -74,8 +74,10 @@ impl Line {
     /// A reply to one of our calls: to whoever waits for it.
     fn take_reply(&self, mut reply: Value) {
         let Some((waiter, sink)) = reply["id"].as_u64().and_then(|id| lock(&self.pending).remove(&id)) else { return };
-        if let (Some((sink, require_resize)), Some(there)) = (sink, reply["result"]["channel"].as_u64()) {
-            if require_resize && reply["result"]["resize_notifications"] != true {
+        if let (Some((sink, (require_resize, require_paint))), Some(there)) = (sink, reply["result"]["channel"].as_u64()) {
+            if (require_resize && reply["result"]["resize_notifications"] != true)
+                || (require_paint && reply["result"]["paint_boundaries"] != true)
+            {
                 let _ = self.frames.send(wire::encode(there as u32, wire::CLOSE, b""));
                 reply = crate::rpc::response(
                     reply["id"].clone(),
@@ -110,7 +112,7 @@ impl Line {
         machine: &str,
         method: &str,
         params: Value,
-        sink: Option<(Sink, bool)>,
+        sink: Option<(Sink, (bool, bool))>,
         deadline: Duration,
     ) -> Result<Value, RpcError> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -425,6 +427,11 @@ async fn hold(core: &Arc<Core>, m: &Machine, mut d: crate::machines::Dialed) {
             (there, wire::RESIZE) if payload.len() == 4 => {
                 if let Some((conn, here)) = lock(&line.streams).get(&there) {
                     conn.with(|out| out.ordered_resize(*here, &payload));
+                }
+            }
+            (there, wire::PAINT_END) => {
+                if let Some((conn, here)) = lock(&line.streams).get(&there) {
+                    conn.with(|out| out.paint_end(*here));
                 }
             }
             (there, wire::CLOSE) => {

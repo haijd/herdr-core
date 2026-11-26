@@ -199,7 +199,7 @@ async fn reconnect_rejects_downgrade_before_mapping_fallback_data() {
                     "relay",
                     "terminal.attach",
                     json!({"observe": true, "resumed": true, "resize_notifications": true}),
-                    Some(((sink, 7), true)),
+                    Some(((sink, 7), (true, false))),
                     Duration::from_secs(1),
                 )
                 .await

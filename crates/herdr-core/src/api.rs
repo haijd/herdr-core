@@ -20,6 +20,7 @@ pub const FEATURES: &[&str] = &[
     "status",
     "shell",
     "resize_notifications",
+    "paint_boundaries",
     "automatic_input",
     "restart_environment",
 ];
@@ -451,16 +452,19 @@ async fn terminal_attach(core: Ctx<'_>, p: AttachParams) -> Result<AttachResult,
     let req = crate::viewers::AttachRequest {
         observe: p.observe,
         resize_notifications: p.resize_notifications,
+        paint_boundaries: p.paint_boundaries,
         history: p.history,
         size: (p.cols, p.rows),
         display: p.display,
         resumed: p.resumed,
     };
     let channel = core.attach(conn, id, req)?;
+    let resize_notifications = p.observe && p.resize_notifications;
     Ok(AttachResult {
         channel,
         terminal: Public(record(core, id)?),
-        resize_notifications: p.observe && p.resize_notifications,
+        resize_notifications,
+        paint_boundaries: resize_notifications && p.paint_boundaries,
         automatic_input: true,
     })
 }
