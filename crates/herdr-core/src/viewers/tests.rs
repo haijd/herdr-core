@@ -34,6 +34,7 @@ fn resize_drags_serialize_nothing_without_observers_and_only_latest_when_stalled
         observe,
         resize_notifications,
         paint_boundaries: false,
+        keep_size_on_detach: false,
         history: 0,
         size: (80, 24),
         display: Display::default(),
@@ -120,6 +121,7 @@ fn paint_boundaries_cover_attach_resize_lag_and_supersede_and_never_leak_to_unop
         observe,
         resize_notifications,
         paint_boundaries,
+        keep_size_on_detach: false,
         history: 0,
         size: (80, 24),
         display: Display::default(),
@@ -189,6 +191,63 @@ fn paint_boundaries_cover_attach_resize_lag_and_supersede_and_never_leak_to_unop
     assert_eq!(sup.first().map(|x| (x.0, x.1.as_slice())), Some((wire::RESIZE, &[120, 0, 36, 0][..])));
     assert_eq!(sup.iter().filter(|x| x.0 == wire::PAINT_END).count(), 1);
     assert_eq!(sup.last().map(|x| x.0), Some(wire::PAINT_END));
+
+    drop(core);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn keep_size_on_detach_preserves_size_when_opted_in() {
+    let root = crate::test_tmp().join(format!("hc-keep-size-{}", crate::platform::random_hex()));
+    let paths = crate::paths::Paths {
+        socket: root.join("core.sock"),
+        holder_socket: root.join("holder.sock"),
+        state: root.clone(),
+        config: root.join("config.toml"),
+    };
+    paths.create_dirs().unwrap();
+    let core = Core::start(paths, crate::api::CoreInfo { id: "test".into(), name: "test".into() }).unwrap();
+    let id = {
+        let mut st = core.lock();
+        let id = st
+            .reg
+            .create(
+                crate::terminals::NewTerminal { argv: vec!["sh".into()], cols: 100, rows: 30, ..Default::default() },
+                0,
+            )
+            .unwrap();
+        st.screens.insert(id, ghostty_vt::Terminal::new(100, 30, 1 << 20));
+        id
+    };
+    let req = |keep| AttachRequest {
+        observe: false,
+        resize_notifications: false,
+        paint_boundaries: false,
+        keep_size_on_detach: keep,
+        history: 0,
+        size: (110, 32),
+        display: Display::default(),
+        resumed: false,
+    };
+
+    let c1 = Arc::new(Conn::default());
+    let ch1 = core.attach(&c1, id, req(true)).unwrap();
+    core.viewer_resize(&c1, ch1, 118, 28);
+    core.detach(&c1, Some(ch1));
+    {
+        let st = core.lock();
+        let t = &st.reg.terminals[&id];
+        assert_eq!((t.cols, t.rows), (118, 28), "keep_size_on_detach=true preserves resized PTY dimensions");
+    }
+
+    let c2 = Arc::new(Conn::default());
+    let ch2 = core.attach(&c2, id, req(false)).unwrap();
+    core.detach(&c2, Some(ch2));
+    {
+        let st = core.lock();
+        let t = &st.reg.terminals[&id];
+        assert_eq!((t.cols, t.rows), core.headless(), "keep_size_on_detach=false reverts to headless");
+    }
 
     drop(core);
     std::fs::remove_dir_all(root).unwrap();

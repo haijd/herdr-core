@@ -34,6 +34,7 @@ pub struct Viewer {
     pub observe: bool,
     resize_notifications: bool,
     pub(crate) paint_boundaries: bool,
+    keep_size_on_detach: bool,
     repaint_pending: bool,
     size: (u16, u16),
     /// None: not active since it came back after a dropped line.
@@ -61,6 +62,7 @@ pub struct AttachRequest {
     pub observe: bool,
     pub resize_notifications: bool,
     pub paint_boundaries: bool,
+    pub keep_size_on_detach: bool,
     pub history: usize,
     pub size: (u16, u16),
     pub display: Display,
@@ -85,12 +87,14 @@ impl Core {
         let recovering = st.screens[&id].continuation().is_none();
         let resize_notifications = req.observe && req.resize_notifications;
         let paint_boundaries = resize_notifications && req.paint_boundaries;
+        let keep_size_on_detach = !req.observe && req.keep_size_on_detach;
         st.viewers.entry(id).or_default().push(Viewer {
             conn: conn.clone(),
             channel,
             observe: req.observe,
             resize_notifications,
             paint_boundaries,
+            keep_size_on_detach,
             repaint_pending: false,
             size: req.size,
             active_at: (!req.resumed).then(Instant::now),
@@ -99,7 +103,7 @@ impl Core {
             answers: Default::default(),
         });
         if !req.observe {
-            self.apply_size(&mut st, id);
+            self.apply_size(&mut st, id, false);
         }
         let paint = first_paint(&st, id, req.history);
         st.viewers.get_mut(&id).unwrap().last_mut().unwrap().repaint_pending = false;
@@ -321,7 +325,7 @@ impl Core {
             return None;
         }
         v.active_at = Some(Instant::now());
-        self.apply_size(st, id);
+        self.apply_size(st, id, false);
         Some(id)
     }
 
@@ -397,31 +401,43 @@ impl Core {
         let mut touched = Vec::new();
         for (id, vs) in st.viewers.iter_mut() {
             let mut typing_left = false;
+            let mut keep_size = false;
             vs.retain(|v| {
                 let leaves = Arc::ptr_eq(&v.conn, conn) && channel.is_none_or(|c| c == v.channel);
                 typing_left |= leaves && !v.observe;
+                keep_size |= leaves && !v.observe && v.keep_size_on_detach;
                 !leaves
             });
             if typing_left {
-                touched.push(*id);
+                touched.push((*id, keep_size));
             }
         }
         st.viewers.retain(|_, vs| !vs.is_empty());
-        for id in touched {
-            self.apply_size(&mut st, id);
+        for (id, keep_size) in touched {
+            self.apply_size(&mut st, id, keep_size);
         }
     }
 
     /// The most recently active typing viewer sets size and display facts;
-    /// with none, the terminal runs headless.
-    fn apply_size(&self, st: &mut State, id: u32) {
+    /// with none, the terminal runs headless unless the departing viewer opted
+    /// into keeping its current dimensions (`keep_size_on_detach`).
+    fn apply_size(&self, st: &mut State, id: u32, keep_if_headless: bool) {
         let leader = st.viewers.get(&id).and_then(|vs| vs.iter().filter(|v| !v.observe).max_by_key(|v| v.active_at));
-        let (cols, rows) = leader.map_or_else(|| self.headless(), |v| v.size);
+        let leader_size = leader.map(|v| v.size);
         let display = leader.map(|v| v.display.clone());
         if !st.screens.contains_key(&id) {
             return;
         }
         self.apply_display(st, id, display.as_ref());
+        let fallback_size = (!keep_if_headless).then(|| self.headless());
+        let (cols, rows) = match (leader_size, fallback_size) {
+            (Some(sz), _) => sz,
+            (None, Some(sz)) => sz,
+            (None, None) => {
+                let rec = st.reg.terminals.get(&id).expect("live terminal");
+                (rec.cols, rec.rows)
+            }
+        };
         let rec = st.reg.terminals.get_mut(&id).expect("live terminal");
         if (rec.cols, rec.rows) == (cols, rows) || cols == 0 || rows == 0 {
             return;
